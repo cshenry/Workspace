@@ -324,10 +324,19 @@ sub login {
 }
 
 sub logout {
-	Bio::P3::Workspace::ScriptHelpers::SetConfig({
-		token => undef,
-		user_id => undef
+    Bio::P3::Workspace::ScriptHelpers::SetConfig({
+	token => undef,
+	user_id => undef
 	});
+    #
+    # Update the KBase .kbase_config file as well.
+    #
+    if ($have_kb_auth)
+    {
+	Bio::KBase::Auth::SetConfigs(token => undef,
+				     user_id => undef,
+				     password => undef);
+    }
 }
 
 sub msClient {
