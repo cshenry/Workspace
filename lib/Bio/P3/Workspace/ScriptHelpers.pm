@@ -11,6 +11,13 @@ use Bio::P3::Workspace::WorkspaceClient;
 use Bio::P3::Workspace::WorkspaceClientExt;
 use Bio::ModelSEED::ProbModelSEED::ProbModelSEEDClient;
 
+our $have_kb_auth = 0;
+eval
+{
+    require Bio::KBase::Auth;
+    $have_kb_auth = 1;
+};
+
 our $defaultWSURL   = "http://p3.theseed.org/services/Workspace";
 our $defaultAPPURL = "http://p3.theseed.org/services/app_service";
 our $defaultMSURL = "https://p3.theseed.org/services/ProbModelSEED";
@@ -303,6 +310,15 @@ sub login {
 			user_id => $params->{user_id},
 			password => undef
 		});
+		#
+		# Update the KBase .kbase_config file as well.
+		#
+		if ($have_kb_auth)
+		{
+		    Bio::KBase::Auth::SetConfigs(token => $token,
+						 user_id => $params->{user_id},
+						 password => undef);
+		}
 	}
 	return $token;
 }
