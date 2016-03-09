@@ -1144,7 +1144,6 @@ sub _download_request
 			     {
 				 $writer->write($data);
 				 my $len = length($data);
-				 print STDERR "B $len\n";
 				 return 1;
 			     }
 			     else
@@ -1193,7 +1192,6 @@ sub _download_request
 					   if ($h->{rbuf})
 					   {
 					       my $len = length($h->{rbuf});
-					       print "R $len\n";
 					       $writer->write($h->{rbuf});
 					       $h->rbuf = '';
 					   }
