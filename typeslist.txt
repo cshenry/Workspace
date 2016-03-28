@@ -33,6 +33,7 @@ json
 mapping
 media
 model
+modelfolder
 model_edit
 modeltemplate
 pdf
@@ -54,3 +55,4 @@ wig
 xls
 xlsx
 zip
+contigset
