@@ -1193,8 +1193,13 @@ sub _download_request
 
 	    my $url = $res->{shock_node} . "?download";
 	    print STDERR "retrieve $url\n";
+	    my @headers;
+	    if ($res->{user_token})
+	    {
+		@headers = (headers => {Authorization => "OAuth $res->{user_token}" });
+	    }
 	    http_request(GET => $url,
-			 headers => {Authorization => "OAuth $res->{user_token}" },
+			 @headers,
 			 # handle_params => { max_read_size => 32768 },
 			 on_body => sub {
 			     my($data, $hdr) = @_;
