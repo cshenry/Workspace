@@ -7,10 +7,13 @@
 	use Data::Dumper;
 	use Config::Simple;
 	
+	my $serverclass = "Bio::P3::Workspace::WorkspaceImpl";
+	my $clientclass = "Bio::P3::Workspace::WorkspaceClient";
+	
 	sub new {
 	    my($class,$bin) = @_;
 	    my $c = Config::Simple->new();
-		$c->read($bin."test.cfg");
+		$c->read($bin."/test.cfg");
 	    my $self = {
 			testcount => 0,
 			dumpoutput => $c->param("WorkspaceTest.dumpoutput"),
@@ -32,16 +35,21 @@
 		});
 	    $ENV{KB_INTERACTIVE} = 1;
 	    if (defined($c->param("WorkspaceTest.serverconfig"))) {
-	    	$ENV{KB_DEPLOYMENT_CONFIG} = $bin.$c->param("WorkspaceTest.serverconfig");
+	    	$ENV{KB_DEPLOYMENT_CONFIG} = $bin."/".$c->param("WorkspaceTest.serverconfig");
 	    }
 	    if (!defined($self->{url}) || $self->{url} eq "impl") {
 	    	print "Loading server with this config: ".$ENV{KB_DEPLOYMENT_CONFIG}."\n";
-	    	require "Bio/P3/Workspace/WorkspaceImpl.pm";
-	    	$self->{obj} = Bio::P3::Workspace::WorkspaceImpl->new();
+	    	my $classpath = $serverclass;
+	    	$classpath =~ s/::/\//g;
+	    	require $classpath.".pm";
+	    	$self->{obj} = $serverclass->new({});
 	    } else {
-	    	require "Bio/P3/Workspace/WorkspaceClient.pm";
-	    	$self->{clientobj} = Bio::P3::Workspace::WorkspaceClient->new($self->{url},token => $self->{token});
-	    	$self->{clientobjtwo} = Bio::P3::Workspace::WorkspaceClient->new($self->{url},token => $self->{tokentwo});
+	    	my $classpath = $clientclass;
+	    	$classpath =~ s/::/\//g;
+	    	require $classpath.".pm";
+	    	$self->{clientobj} = $clientclass->new($self->{url},token => $self->{token});
+	    	$self->{clientobjtwo} = $clientclass->new($self->{url},token => $self->{tokentwo});
+	    	$self->{clientobjthree} = $clientclass->new($self->{url},token => undef);
 	    }
 	    return bless $self, $class;
 	}
@@ -50,13 +58,20 @@
 		my($self,$user) = @_;
 		if (!defined($self->{url}) || $self->{url} eq "impl") {
 			if ($user == 2) {
-				$Bio::P3::Workspace::WorkspaceImpl::CallContext = Bio::P3::Workspace::WorkspaceImpl::CallContext->new($self->{tokentwo},"test",$self->{usertwo});
+				$Bio::P3::Workspace::WorkspaceImpl::CallContext = undef;
+				$Bio::P3::Workspace::WorkspaceImpl::CallContext = CallContext->new($self->{tokentwo},"test",$self->{usertwo});
+			} elsif ($user == 3) {
+				$Bio::P3::Workspace::WorkspaceImpl::CallContext = undef;
+				$Bio::P3::Workspace::WorkspaceImpl::CallContext = CallContext->new(undef,"test",undef);
 			} else {
-				$Bio::P3::Workspace::WorkspaceImpl::CallContext = Bio::P3::Workspace::WorkspaceImpl::CallContext->new($self->{token},"test",$self->{user});
+				$Bio::P3::Workspace::WorkspaceImpl::CallContext = undef;
+				$Bio::P3::Workspace::WorkspaceImpl::CallContext = CallContext->new($self->{token},"test",$self->{user});
 			}
 		} else {
 			if ($user == 2) {
 				$self->{obj} = $self->{clientobjtwo};
+			} elsif ($user == 3) {
+				$self->{obj} = $self->{clientobjthree};
 			} else {
 				$self->{obj} = $self->{clientobj};
 			}
@@ -298,11 +313,9 @@
 			["defined(\$output->[0])","Getting metadata for created object back"],
 			["\$output->[0]->[1] eq \"genome\"","Object has type genome"],
 			["defined(\$output->[0]->[11])","Shock URL is returned"]
-			
 		],0,undef,1);
 		
 		#Uploading file to newly created shock node
-		print "Filename:".$self->{bin}."testdata.txt\n";
 		my $req = HTTP::Request::Common::POST($output->[0]->[11],Authorization => "OAuth ".$self->{token},Content_Type => 'multipart/form-data',Content => [upload => [$self->{bin}."testdata.txt"]]);
 		$req->method('PUT');
 		my $ua = LWP::UserAgent->new();
@@ -416,9 +429,15 @@
 			new_global_permission => "w"
 		},"Successfully changed global permissions!",[],0,undef,1);
 		
+		#Copy objects
+		$output = $self->test_harness("copy",{
+			objects => [["/".$self->{usertwo}."/TestWorkspace/copydir","/".$self->{usertwo}."/TestWorkspace/copydir_two"]],
+			recursive => 1
+		},"Successfully ran copy to move objects!",[],0,undef,2);
+		
 		#Moving objects
 		$output = $self->test_harness("copy",{
-			objects => [["/".$self->{usertwo}."/TestWorkspace/copydir","/".$self->{user}."/TestWorkspace/movedir"]],
+			objects => [["/".$self->{usertwo}."/TestWorkspace/copydir_two","/".$self->{user}."/TestWorkspace/movedir"]],
 			recursive => 1,
 			move => 1
 		},"Successfully ran copy to move objects!",[],0,undef,2);
@@ -446,6 +465,20 @@
 			objects => [["/".$self->{user}."/TestWorkspace/emptydir","folder",{},undef]]
 		},"Successfully created a workspace directory!",[],0,undef,1);
 		
+		#Creating a model folder
+		$output = $self->test_harness("create",{
+			objects => [["/".$self->{user}."/TestWorkspace/emptydir/modelfolder","modelfolder",{},undef]]
+		},"Successfully created a folder with type other than folder!",[],0,undef,1);
+		
+		#Listing model folder
+		$output = $self->test_harness("ls",{
+			paths => ["/".$self->{user}."/TestWorkspace/emptydir/"],
+			excludeDirectories => 0,
+			excludeObjects => 0,
+			recursive => 1
+		},"Listing nonfolder directory",[
+			["\$output->{\"/".$self->{user}."/TestWorkspace/emptydir/\"}->[0]->[8]->{is_folder} == 1","ls indicates that object is a folder"]
+		],0,undef,1);
 		#Getting an object
 		$output = $self->test_harness("get",{
 			objects => ["/".$self->{user}."/TestWorkspace/testdir/testdir2/testdir3/testobj"]
@@ -459,6 +492,45 @@
 		},"Successfully retrieved an object by UUID!",[
 			["defined(\$output->[0]->[1])","Object retrieved with all data"]
 		],0,undef,1);
+		
+		#Publishing workspace
+		$output = $self->test_harness("set_permissions",{
+			path => "/".$self->{usertwo}."/TestWorkspace",
+			new_global_permission => "p"
+		},"Publishing workspace",[],0,undef,2);
+		
+		#Attempting to write to published workspace
+		$output = $self->test_harness("create",{
+			objects => [["/".$self->{usertwo}."/TestWorkspace/test_write_published_workspace","folder",{},undef]]
+		},"Cannot write to published workspace",[],1,undef,2);
+		
+		#Listing public workspace
+		$output = $self->test_harness("ls",{
+			paths => ["/".$self->{usertwo}."/TestWorkspace"]
+		},"Using ls function on published workspace without auth",[],0,undef,3);
+		
+		#Getting object from public workspace
+		$output = $self->test_harness("get",{
+			objects => ["/".$self->{usertwo}."/TestWorkspace/copydir/testdir2/testdir3/shockobj"]
+		},"Using get function to retrieve object from published workspace without auth",[],0,undef,3);
+		system("curl ".$output->[0]->[0]->[11]."?download");
+		
+		#Unpublishing workspace
+		$output = $self->test_harness("set_permissions",{
+			path => "/".$self->{usertwo}."/TestWorkspace",
+			new_global_permission => "r"
+		},"Unpublishing workspace",[],0,undef,2);
+		
+		#Listing public workspace
+		$output = $self->test_harness("ls",{
+			paths => ["/".$self->{usertwo}."/TestWorkspace"]
+		},"Using ls function on public workspace without auth",[],0,undef,3);
+		
+		#Getting object from public workspace
+		$output = $self->test_harness("get",{
+			objects => ["/".$self->{usertwo}."/TestWorkspace/copydir/testdir2/testdir3/shockobj"]
+		},"Using get function to retrieve object from public workspace without auth",[],0,undef,3);
+		system("curl ".$output->[0]->[0]->[11]."?download");
 		
 		#Deleting workspaces
 		$output = $self->test_harness("delete",{
@@ -478,7 +550,7 @@
 }	
 
 {
-	package Bio::P3::Workspace::WorkspaceImpl::CallContext;
+	package CallContext;
 	
 	use strict;
 	

@@ -134,7 +134,7 @@ sub _url {
 sub _error {
 	my($self,$msg) = @_;
 	$msg = "_ERROR_".$msg."_ERROR_";
-	Bio::KBase::Exceptions::ArgumentValidationError->throw(error => $msg,method_name => $self->_current_method());
+	Bio::KBase::Exceptions::ArgumentValidationError->throw(error => $msg,method_name => "");#$self->_current_method());
 }
 
 sub _db_path {
@@ -165,14 +165,7 @@ sub _user_is_admin {
 
 sub _updateDB {
 	my ($self,$name,$query,$update) = @_;
-	my $data = $self->_mongodb()->run_command({
-		findAndModify => $name,
-		query => $query,
-		update => $update
-	});
-	if (ref($data) ne "HASH" || !defined($data->{value})) {
-		return 0;
-	}
+	$self->_mongodb()->get_collection($name)->update($query,$update);
 	return 1;
 }
 
@@ -222,6 +215,7 @@ sub _generate_object_meta {
 		if (defined($obj->{shocknode})) {
 			$shock = $obj->{shocknode};
 		}
+		$obj->{autometadata}->{is_folder} = $self->is_folder($obj->{type});
 		return [$obj->{name},$obj->{type},$path,$obj->{creation_date},$obj->{uuid},$obj->{owner},$obj->{size},$obj->{metadata},$obj->{autometadata},$self->_get_ws_permission($obj->{wsobj}),$obj->{wsobj}->{global_permission},$shock];
 	} else {
 		return [$obj->{name},"folder","/".$obj->{owner}."/",$obj->{creation_date},$obj->{uuid},$obj->{owner},0,$obj->{metadata},{},$self->_get_ws_permission($obj),$obj->{global_permission},""];
@@ -230,7 +224,7 @@ sub _generate_object_meta {
 
 #Retrieving object data from filesystem or giving permission to download shock node**
 sub _retrieve_object_data {
-	my ($self,$obj) = @_;
+	my ($self,$obj,$wsobj) = @_;
 	if ($obj->{folder} == 1) {
 		return "";
 	}
@@ -244,8 +238,12 @@ sub _retrieve_object_data {
 		}
 		close($fh);
 	} else {
-		my $ua = LWP::UserAgent->new();
-		my $res = $ua->put($obj->{shocknode}."/acl/all?users=".$self->_getUsername(),Authorization => "OAuth ".$self->_wsauth());
+		if ($wsobj->{global_permission} ne "n") {
+			$self->_make_shock_node_public($obj->{shocknode});
+		} else {
+			my $ua = LWP::UserAgent->new();
+			my $res = $ua->put($obj->{shocknode}."/acl/all?users=".$self->_getUsername(),Authorization => "OAuth ".$self->_wsauth());
+		}
 		$data = $obj->{shocknode};
 	}
 	if (!defined($data)) {
@@ -257,7 +255,7 @@ sub _retrieve_object_data {
 #Validating that the input permissions have a recognizable value**
 sub _validate_workspace_permission {
 	my ($self,$input) = @_;
-	if ($input !~ m/^[awron]$/) {
+	if ($input !~ m/^[awronp]$/) {
 		$self->_error("Input permissions ".$input." invalid!");
 	}
 	return $input;
@@ -308,12 +306,16 @@ sub _validate_object_type {
 
 sub _get_ws_permission {
 	my ($self,$wsobj) = @_;
+	if ($wsobj->{global_permission} eq "p") {
+		return "p";
+	}
 	my $curruser = $self->_getUsername();
 	if ($wsobj->{owner} eq $curruser) {
 		return "o";
 	}
 	my $values = {
 		n => 0,
+		p => 1,
 		r => 1,
 		w => 2,
 		a => 3,
@@ -336,6 +338,7 @@ sub _check_ws_permissions {
 	my $perm = $self->_get_ws_permission($wsobj);
 	my $values = {
 		n => 0,
+		p => 1,
 		r => 1,
 		w => 2,
 		a => 3,
@@ -561,10 +564,17 @@ sub _create_shock_node {
 	my $res = $ua->post($self->_shockurl()."/node",Authorization => "OAuth ".$self->_wsauth());
 	my $json = JSON::XS->new;
 	my $data = $json->decode($res->content);
-	#print "create shock node output:\n".Data::Dumper->Dump([$data])."\n\n";
 	my $res = $ua->put($self->_shockurl()."/node/".$data->{data}->{id}."/acl/all?users=".$self->_getUsername(),Authorization => "OAuth ".$self->_wsauth());
-	#print "authorizing shock node output:\n".Data::Dumper->Dump([$res])."\n\n";
 	return $data->{data}->{id};
+}
+
+sub _make_shock_node_public {
+	my ($self,$url) = @_;
+	my $ua = LWP::UserAgent->new();
+	my $res = $ua->get($url."/acl/",Authorization => "OAuth ".$self->_wsauth());
+	my $json = JSON::XS->new;
+	my $data = $json->decode($res->content);
+	$res = $ua->delete($url."/acl/read?users=".join(",",@{$data->{data}->{read}}),Authorization => "OAuth ".$self->_wsauth());
 }
 
 sub _update_shock_node {
@@ -576,7 +586,6 @@ sub _update_shock_node {
 		my $res = $ua->get($object->{shocknode},Authorization => "OAuth ".$self->_wsauth());
 		my $json = JSON::XS->new;
 		my $data = $json->decode($res->content);
-		print Data::Dumper->Dump([$data])."\n";
 		if (length($data->{data}->{file}->{name}) == 0) {
 			$self->{_shockupdate}->{$object->{uuid}} = time();
 		} else {
@@ -615,7 +624,7 @@ sub _validate_save_objects_before_saving {
 	    		my $nocreate = 0;
 	    		#We are creating a workspace
 	    		if (defined($wsobj)) {
-		    		if ($objects->[$i]->[1] eq "folder") {
+		    		if ($self->is_folder($objects->[$i]->[1]) == 1) {
 		    			#We ignore creation of folders that already exist
 		    			$nocreate = 1;	
 		    		} else {
@@ -625,7 +634,7 @@ sub _validate_save_objects_before_saving {
 		    	} elsif ($user ne $self->_getUsername() && $self->_adminmode() == 0) {
 		    		#Users can only create their own workspaces
 		    		$self->_error("Insufficient permissions to create ".$objects->[$i]->[0]);
-		    	} elsif ($objects->[$i]->[1] ne "folder") {
+		    	} elsif ($self->is_folder($objects->[$i]->[1]) == 0) {
 		    		#Workspace must be a folder
 		    		$self->_error("Cannot create ".$objects->[$i]->[0]." because top level objects must be folders!");
 		    	}
@@ -652,7 +661,7 @@ sub _validate_save_objects_before_saving {
 			    my $nocreate = 0;
 			    if (defined($obj)) {
 		    		if ($obj->{folder} == 1) {
-		    			if ($objects->[$i]->[1] eq "folder") {
+		    			if ($self->is_folder($objects->[$i]->[1]) == 1) {
 		    				#We ignore creation of folders that already exist
 		    				$nocreate = 1;	
 		    			} else {
@@ -809,6 +818,10 @@ sub _create_workspace {
 	my ($self,$specs) = @_;
     if (!defined($specs->{user}) || length($specs->{user}) == 0) {$self->_error("Owner not specified in creation!");}
     if (!defined($specs->{workspace}) || length($specs->{workspace}) == 0) {$self->_error("Top directory not specified in creation!");}
+    if ($specs->{user} ne $self->_getUsername() && $self->_adminmode() == 0) {
+    	$self->_error("User does not have permission to create workspace!");
+    }
+    
     #Creating workspace directory on disk
     File::Path::mkpath ($self->_db_path()."/".$specs->{user}."/".$specs->{workspace});
     #Creating workspace object in mongodb
@@ -847,6 +860,7 @@ sub _create_object {
     	$specs->{creation_date} = DateTime->now()->datetime();
     }
     my $wsobj = $self->_wscache($specs->{user},$specs->{workspace});
+    $self->_check_ws_permissions($wsobj,"w",1);
 	my $object = {
 		wsobj => $wsobj,
 		size => 0,
@@ -868,7 +882,7 @@ sub _create_object {
 	if (!defined($object->{wsobj}->{owner}) || length($object->{wsobj}->{owner}) == 0) {$self->_error("Owner not specified in creation!");}
     if (!defined($object->{wsobj}->{name}) || length($object->{wsobj}->{name}) == 0) {$self->_error("Top directory not specified in creation!");}
     if (!defined($object->{name}) || length($object->{name}) == 0) {$self->_error("Name not specified in creation!");}
-	if ($specs->{type} eq "folder") {
+	if ($self->is_folder($specs->{type}) == 1) {
 		#Creating folder on file system
 		$object->{autometadata} = {};
 		$object->{folder} = 1;
@@ -952,19 +966,63 @@ sub _wscache {
 
 #List all workspaces matching input query**
 sub _list_workspaces {
-	my ($self,$user) = @_;
-	my $query = { '$or' => [ {owner => $self->_getUsername()},{global_permission => {'$ne' => "n"} },{"permissions.".$self->_getUsername() => {'$exists' => 1 } } ] };
-	if ($self->_adminmode() == 1) {
-		$query = {};
-	}
+	my ($self,$user,$query) = @_;
 	if (defined($user)) {
-		if ($user eq $self->_getUsername()) {
-			$query = {owner => $self->_getUsername()};
-		} else {
-			$query = { '$and' => [ {owner => $user },{ '$or' => [ {global_permission => {'$ne' => "n"} },{"permissions.".$self->_getUsername() => {'$exists' => 1 } } ] } ] };
-			if ($self->_adminmode() == 1) {
-				$query = {owner => $user};
+		$query->{owner} = $user;
+	}
+	if ($self->_adminmode() != 1) {
+		if (defined($query->{'$or'})) {
+			my $oldarray = $query->{'$or'};
+			$query->{'$or'} = [];
+			for (my $i=0; $i < @{$oldarray}; $i++) {
+				my $included = 0;
+				if (!defined($oldarray->[$i]->{owner})) {
+					my $hash = {};
+					foreach my $key (keys(%{$oldarray->[$i]})) {
+						$hash->{$key} = $oldarray->[$i]->{$key};
+					}
+					$hash->{owner} = $self->_getUsername();
+					push(@{$query->{'$or'}},$hash);
+				} elsif ($oldarray->[$i]->{owner} eq $self->_getUsername()) {
+					$included = 1;
+					my $hash = {};
+					foreach my $key (keys(%{$oldarray->[$i]})) {
+						$hash->{$key} = $oldarray->[$i]->{$key};
+					}
+					push(@{$query->{'$or'}},$hash);
+				}
+				if (!defined($oldarray->[$i]->{global_permission})) {
+					my $hash = {};
+					foreach my $key (keys(%{$oldarray->[$i]})) {
+						$hash->{$key} = $oldarray->[$i]->{$key};
+					}
+					$hash->{global_permission} = {'$ne' => "n"};
+					push(@{$query->{'$or'}},$hash);
+				} elsif ($oldarray->[$i]->{global_permission} ne "n" && $included == 0) {
+					$included = 1;
+					my $hash = {};
+					foreach my $key (keys(%{$oldarray->[$i]})) {
+						$hash->{$key} = $oldarray->[$i]->{$key};
+					}
+					push(@{$query->{'$or'}},$hash);
+				}
+				if (!defined($oldarray->[$i]->{"permissions.".$self->_getUsername()})) {
+					my $hash = {};
+					foreach my $key (keys(%{$oldarray->[$i]})) {
+						$hash->{$key} = $oldarray->[$i]->{$key};
+					}
+					$hash->{"permissions.".$self->_getUsername()} = {'$exists' => 1 };
+					push(@{$query->{'$or'}},$hash);
+				} elsif ($included == 0) {
+					my $hash = {};
+					foreach my $key (keys(%{$oldarray->[$i]})) {
+						$hash->{$key} = $oldarray->[$i]->{$key};
+					}
+					push(@{$query->{'$or'}},$hash);
+				}
 			}
+		} else {
+			$query->{'$or'} = [ {owner => $self->_getUsername()},{global_permission =>  {'$ne' => "n"}},{"permissions.".$self->_getUsername() =>  {'$exists' => 1 }} ]
 		}
 	}
     my $objs = [];
@@ -1034,7 +1092,7 @@ sub _formatQuery {
 		}
 	}
 	foreach my $term (keys(%{$inquery})) {
-		if (ref($inquery->{$term}) eq "ARRAY") {
+		if (ref($inquery->{$term}) eq "ARRAY" && $term ne '$or') {
 			$inquery->{$term} = {'$in' => $inquery->{$term}};
 		}
 	}
@@ -1249,6 +1307,14 @@ sub _compute_autometadata {
 	}
 };
 
+sub is_folder {
+	my($self, $type) = @_;
+	if (defined($self->{_foldertypes}->{lc($type)})) {
+		return 1;
+	}
+	return 0;
+}
+
 #END_HEADER
 
 sub new
@@ -1288,7 +1354,7 @@ sub new
 			$c->read($e);
 			for my $p (@{$paramlist}) {
 			  	my $v = $c->param("$service.$p");
-			    if ($v && !defined($params->{$p})) {
+			  	if ($v && !defined($params->{$p})) {
 					$params->{$p} = $v;
 					if ($v eq "null") {
 						$params->{$p} = undef;
@@ -1296,7 +1362,7 @@ sub new
 			    }
 			}
 		}
-    } 
+    }
 	$params = $self->_validateargs($params,["db-path","wsuser","wspassword","types-file"],{
 		"script-path" => "/kb/deployment/plbin/",
 		"job-directory" => "/tmp/wsjobs/",
@@ -1340,6 +1406,10 @@ sub new
 	$self->{_params} = $params;
 	$self->{_params}->{"db-path"} =~ s/\/\//\//g;
 	$self->{_params}->{"db-path"} =~ s/\/$//g;
+	$self->{_foldertypes} = {
+		folder => 1,
+		modelfolder => 1
+	};
     #END_CONSTRUCTOR
 
     if ($self->can('_init_instance'))
@@ -1849,7 +1919,7 @@ sub get
 	    	} else {
 	    		push(@{$output},[
 		    		$self->_generate_object_meta($obj),
-	    			$self->_retrieve_object_data($obj)
+	    			$self->_retrieve_object_data($obj,$wsobj)
 		    	]);
 	    	}
     	}
@@ -2106,7 +2176,6 @@ sub get_download_url
 	    workspace_path => $ws_path,
 	};
 
-	print Dumper($obj);
 	if (!defined($obj->{shock}) || $obj->{shock} == 0) {
 	    my $filename = $self->_db_path()."/".$obj->{wsobj}->{owner}."/".$obj->{wsobj}->{name}."/".$obj->{path}."/".$obj->{name};
 	    $doc->{file_path} = $filename;
@@ -2724,7 +2793,9 @@ sub delete
 
 <pre>
 $input is a set_permissions_params
-$output is an ObjectMeta
+$output is a reference to a list where each element is a reference to a list containing 2 items:
+	0: a Username
+	1: a WorkspacePerm
 set_permissions_params is a reference to a hash where the following keys are defined:
 	path has a value which is a FullObjectPath
 	permissions has a value which is a reference to a list where each element is a reference to a list containing 2 items:
@@ -2737,26 +2808,6 @@ FullObjectPath is a string
 Username is a string
 WorkspacePerm is a string
 bool is an int
-ObjectMeta is a reference to a list containing 12 items:
-	0: an ObjectName
-	1: an ObjectType
-	2: a FullObjectPath
-	3: (creation_time) a Timestamp
-	4: an ObjectID
-	5: (object_owner) a Username
-	6: an ObjectSize
-	7: a UserMetadata
-	8: an AutoMetadata
-	9: (user_permission) a WorkspacePerm
-	10: (global_permission) a WorkspacePerm
-	11: (shockurl) a string
-ObjectName is a string
-ObjectType is a string
-Timestamp is a string
-ObjectID is a string
-ObjectSize is an int
-UserMetadata is a reference to a hash where the key is a string and the value is a string
-AutoMetadata is a reference to a hash where the key is a string and the value is a string
 
 </pre>
 
@@ -2765,7 +2816,9 @@ AutoMetadata is a reference to a hash where the key is a string and the value is
 =begin text
 
 $input is a set_permissions_params
-$output is an ObjectMeta
+$output is a reference to a list where each element is a reference to a list containing 2 items:
+	0: a Username
+	1: a WorkspacePerm
 set_permissions_params is a reference to a hash where the following keys are defined:
 	path has a value which is a FullObjectPath
 	permissions has a value which is a reference to a list where each element is a reference to a list containing 2 items:
@@ -2778,26 +2831,6 @@ FullObjectPath is a string
 Username is a string
 WorkspacePerm is a string
 bool is an int
-ObjectMeta is a reference to a list containing 12 items:
-	0: an ObjectName
-	1: an ObjectType
-	2: a FullObjectPath
-	3: (creation_time) a Timestamp
-	4: an ObjectID
-	5: (object_owner) a Username
-	6: an ObjectSize
-	7: a UserMetadata
-	8: an AutoMetadata
-	9: (user_permission) a WorkspacePerm
-	10: (global_permission) a WorkspacePerm
-	11: (shockurl) a string
-ObjectName is a string
-ObjectType is a string
-Timestamp is a string
-ObjectID is a string
-ObjectSize is an int
-UserMetadata is a reference to a hash where the key is a string and the value is a string
-AutoMetadata is a reference to a hash where the key is a string and the value is a string
 
 
 =end text
@@ -2833,12 +2866,30 @@ sub set_permissions
     	new_global_permission => undef
     });
     my ($user,$ws,$path,$name) = $self->_parse_ws_path($input->{path});
+    #Checking that workspace exists and a top lever directory is being adjusted
     my $wsobj = $self->_wscache($user,$ws,1);
     if (length($path) + length($name) > 0) {
     	$self->_error("Can only set permissions on top-level folders!");
     }
-    $self->_check_ws_permissions($wsobj,"a",1);
+    #Checking that user has permissions to change permissions
+    if ($wsobj->{global_permission} eq "p") {
+    	if ($wsobj->{owner} ne $self->_getUsername() && $self->_adminmode() == 0) {
+    		$self->_error("Only owner and administrators can change permissions on a published workspace!");
+    	}
+    } else {
+    	$self->_check_ws_permissions($wsobj,"a",1);
+    }
+    #Checking that none of the user-permissions are "p"
+    for (my $i=0; $i < @{$input->{permissions}}; $i++) {
+    	if ($input->{permissions}->[$i]->[1] eq "p") {
+    		$self->_error("Cannot set user-specific permissions to publish!");
+    	}
+    }
     if (defined($input->{new_global_permission})) {
+    	#Only workspace owner or administrator can set global permissions to "p"
+    	if ($input->{new_global_permission} eq "p") {
+    		$self->_check_ws_permissions($wsobj,"o",1);
+    	}
     	$input->{new_global_permission} = $self->_validate_workspace_permission($input->{new_global_permission});
     	$self->_updateDB("workspaces",{uuid => $wsobj->{uuid}},{'$set' => {global_permission => $input->{new_global_permission}}});
     	$wsobj->{global_permission} = $input->{new_global_permission};
@@ -2847,11 +2898,17 @@ sub set_permissions
     	$input->{permissions}->[$i]->[1] = $self->_validate_workspace_permission($input->{permissions}->[$i]->[1]);
     	if ($input->{permissions}->[$i]->[1] eq "n" && defined($wsobj->{permissions}->{$input->{permissions}->[$i]->[0]})) {
     		$self->_updateDB("workspaces",{uuid => $wsobj->{uuid}},{'$unset' => {'permissions.'.$input->{permissions}->[$i]->[0] => $wsobj->{permissions}->{$input->{permissions}->[$i]->[0]}}});
+    		delete $wsobj->{permissions}->{$input->{permissions}->[$i]->[0]};
     	} else {
     		$self->_updateDB("workspaces",{uuid => $wsobj->{uuid}},{'$set' => {'permissions.'.$input->{permissions}->[$i]->[0] => $input->{permissions}->[$i]->[1]}});
+    		$wsobj->{permissions}->{$input->{permissions}->[$i]->[0]} = $input->{permissions}->[$i]->[1];
     	}
     }
-    $output = $self->_generate_object_meta($wsobj);
+    $output = [];
+    foreach my $puser (keys(%{$wsobj->{permissions}})) {
+    	push(@{$output},[$puser,$wsobj->{permissions}->{$puser}]);
+	}
+	push(@{$output},["global_permission",$wsobj->{global_permission}]);
     #END set_permissions
     my @_bad_returns;
     (ref($output) eq 'ARRAY') or push(@_bad_returns, "Invalid type for return variable \"output\" (value was \"$output\")");
@@ -2937,6 +2994,7 @@ sub list_permissions
     my($output);
     #BEGIN list_permissions
     $input = $self->_validateargs($input,["objects"],{});
+    $output = {};
     for (my $i=0; $i < @{$input->{objects}}; $i++) {
     	my ($user,$ws,$path,$name) = $self->_parse_ws_path($input->{objects}->[$i]);
    		my $wsobj = $self->_wscache($user,$ws,1);
@@ -2944,6 +3002,7 @@ sub list_permissions
 	    foreach my $puser (keys(%{$wsobj->{permissions}})) {
 		    push(@{$output->{$input->{objects}->[$i]}},[$puser,$wsobj->{permissions}->{$puser}]);
 	    }
+	    push(@{$output->{$input->{objects}->[$i]}},["global_permission",$wsobj->{global_permission}]);
     }
     #END list_permissions
     my @_bad_returns;
